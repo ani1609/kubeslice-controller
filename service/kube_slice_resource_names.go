@@ -136,6 +136,7 @@ const (
 	WorkerServiceImportFinalizer  = "worker.kubeslice.io/worker-service-import-finalizer"
 	SliceQoSConfigFinalizer       = "controller.kubeslice.io/slice-qos-config-finalizer"
 	VPNKeyRotationConfigFinalizer = "controller.kubeslice.io/vpn-key-rotation-config-finalizer"
+	SliceIpamFinalizer            = "controller.kubeslice.io/slice-ipam-finalizer"
 )
 
 // ControllerEndpoint
