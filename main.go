@@ -402,6 +402,10 @@ func initialize(services *service.Services) {
 			setupLog.Error(err, "unable to create webhook", "webhook", "ServiceExportConfig")
 			os.Exit(1)
 		}
+		if err = (&controllerv1alpha1.SliceIpam{}).SetupWebhookWithManager(mgr, service.ValidateSliceIpamCreate, service.ValidateSliceIpamUpdate, service.ValidateSliceIpamDelete); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "SliceIpam")
+			os.Exit(1)
+		}
 		if err = (&workerv1alpha1.WorkerSliceConfig{}).SetupWebhookWithManager(mgr, service.ValidateWorkerSliceConfigUpdate); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "WorkerSliceConfig")
 			os.Exit(1)
