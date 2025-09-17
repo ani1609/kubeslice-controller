@@ -108,6 +108,7 @@ func WithSliceConfigService(
 	wsgrs IWorkerSliceGatewayRecyclerService,
 	mf metrics.IMetricRecorder,
 	vpn IVpnKeyRotationService,
+	sipam ISliceIpamService,
 ) ISliceConfigService {
 	return &SliceConfigService{
 		ns:    ns,
@@ -119,6 +120,7 @@ func WithSliceConfigService(
 		wsgrs: wsgrs,
 		mf:    mf,
 		vpn:   vpn,
+		sipam: sipam,
 	}
 }
 

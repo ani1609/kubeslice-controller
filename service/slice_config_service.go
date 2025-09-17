@@ -49,6 +49,7 @@ type SliceConfigService struct {
 	wsgrs IWorkerSliceGatewayRecyclerService
 	mf    metrics.IMetricRecorder
 	vpn   IVpnKeyRotationService
+	sipam ISliceIpamService
 }
 
 const NamespaceAndClusterFormat = "namespace=%s&cluster=%s"
@@ -190,6 +191,15 @@ func (s *SliceConfigService) ReconcileSliceConfig(ctx context.Context, req ctrl.
 		return ctrl.Result{}, err
 	}
 
+	// Step 3.5: Handle Dynamic IPAM if enabled
+	if sliceConfig.Spec.SliceIpamType == "Dynamic" {
+		logger.Info("Dynamic IPAM enabled, creating SliceIpam resource")
+		if err := s.sipam.CreateSliceIpam(ctx, sliceConfig); err != nil {
+			logger.Errorf("Failed to create SliceIpam resource: %v", err)
+			return ctrl.Result{}, err
+		}
+	}
+
 	// Step 4: Creation of worker slice Objects and Cluster Labels
 	// get cluster cidr from maxClusters of slice config
 	clusterCidr := ""
@@ -267,6 +277,15 @@ func (s *SliceConfigService) cleanUpSliceConfigResources(ctx context.Context,
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	
+	// Cleanup SliceIpam resource if dynamic IPAM was used
+	if slice.Spec.SliceIpamType == "Dynamic" {
+		err = s.sipam.DeleteSliceIpam(ctx, slice.Name, namespace)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	
 	return ctrl.Result{}, nil
 }
 
