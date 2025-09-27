@@ -65,6 +65,9 @@ type ClusterSubnetAllocation struct {
 	// Status represents the current status of the subnet allocation
 	// +kubebuilder:default=Allocated
 	Status SubnetAllocationStatus `json:"status,omitempty"`
+
+	// ReleasedAt is the timestamp when the subnet was released (only set when status="Released")
+	ReleasedAt *metav1.Time `json:"releasedAt,omitempty"`
 }
 
 // SliceIpamStatus defines the observed state of SliceIpam

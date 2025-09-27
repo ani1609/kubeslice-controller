@@ -277,7 +277,7 @@ func (s *SliceConfigService) cleanUpSliceConfigResources(ctx context.Context,
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	
+
 	// Cleanup SliceIpam resource if dynamic IPAM was used
 	if slice.Spec.SliceIpamType == "Dynamic" {
 		err = s.sipam.DeleteSliceIpam(ctx, slice.Name, namespace)
@@ -285,7 +285,7 @@ func (s *SliceConfigService) cleanUpSliceConfigResources(ctx context.Context,
 			return ctrl.Result{}, err
 		}
 	}
-	
+
 	return ctrl.Result{}, nil
 }
 

@@ -19,6 +19,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/kubeslice/kubeslice-controller/apis/controller/v1alpha1"
 	"github.com/kubeslice/kubeslice-controller/metrics"
@@ -36,6 +37,7 @@ type ISliceIpamService interface {
 	GetClusterSubnet(ctx context.Context, sliceName, clusterName, namespace string) (string, error)
 	CreateSliceIpam(ctx context.Context, sliceConfig *v1alpha1.SliceConfig) error
 	DeleteSliceIpam(ctx context.Context, sliceName, namespace string) error
+	CleanupExpiredReleasedSubnets(ctx context.Context, sliceName, namespace string, expirationDuration time.Duration) error
 }
 
 // SliceIpamService follows existing service struct pattern
@@ -140,6 +142,17 @@ func (s *SliceIpamService) reconcileSliceIpamState(ctx context.Context, sliceIpa
 	allocatedCount := len(sliceIpam.Status.AllocatedSubnets)
 	availableCount := totalSubnets - allocatedCount
 
+	// Perform periodic cleanup of expired released subnets (24 hours)
+	cleanupErr := s.CleanupExpiredReleasedSubnets(ctx, sliceIpam.Name, sliceIpam.Namespace, 24*time.Hour)
+	if cleanupErr != nil {
+		logger.Warnf("Failed to cleanup expired released subnets: %v", cleanupErr)
+		// Don't fail reconciliation for cleanup errors, just log them
+	}
+
+	// Recalculate available subnets after potential cleanup
+	allocatedCount = len(sliceIpam.Status.AllocatedSubnets)
+	availableCount = totalSubnets - allocatedCount
+
 	// Update status
 	sliceIpam.Status.TotalSubnets = totalSubnets
 	sliceIpam.Status.AvailableSubnets = availableCount
@@ -151,9 +164,11 @@ func (s *SliceIpamService) reconcileSliceIpamState(ctx context.Context, sliceIpa
 		return result, reconErr
 	}
 
-	logger.Debugf("Successfully reconciled SliceIpam %s - Total: %d, Available: %d", 
+	logger.Debugf("Successfully reconciled SliceIpam %s - Total: %d, Available: %d",
 		sliceIpam.Name, totalSubnets, availableCount)
-	return ctrl.Result{}, nil
+
+	// Requeue after 30 minutes for periodic cleanup and monitoring
+	return ctrl.Result{RequeueAfter: 30 * time.Minute}, nil
 }
 
 // AllocateSubnetForCluster allocates a subnet for a specific cluster
@@ -184,22 +199,26 @@ func (s *SliceIpamService) AllocateSubnetForCluster(ctx context.Context, sliceNa
 		}
 	}
 
-	// Find next available subnet
-	allocatedSubnets := make([]string, 0, len(sliceIpam.Status.AllocatedSubnets))
-	for _, allocation := range sliceIpam.Status.AllocatedSubnets {
-		if allocation.Status == v1alpha1.SubnetStatusAllocated || allocation.Status == v1alpha1.SubnetStatusInUse {
-			allocatedSubnets = append(allocatedSubnets, allocation.Subnet)
-		}
-	}
+	// Convert API allocations to util types for IPAM processing
+	utilAllocations := s.convertAllocationsToUtil(sliceIpam.Status.AllocatedSubnets)
 
-	subnet, err := s.allocator.FindNextAvailableSubnet(
+	// Try to find available subnet with reclamation support (5 minute wait period)
+	subnet, isReclaimed, err := s.allocator.FindNextAvailableSubnetWithReclamation(
 		sliceIpam.Spec.SliceSubnet,
 		sliceIpam.Spec.SubnetSize,
-		allocatedSubnets,
+		utilAllocations,
+		5*time.Minute, // Wait 5 minutes before reclaiming released subnets
 	)
 	if err != nil {
 		logger.Errorf("Failed to find available subnet: %v", err)
 		return "", fmt.Errorf("failed to find available subnet: %v", err)
+	}
+
+	// Handle reclaimed vs new subnet allocation
+	if isReclaimed {
+		// Remove the old released allocation and add new one
+		s.removeReleasedAllocation(sliceIpam, subnet)
+		logger.Infof("Reclaimed previously released subnet %s for cluster %s", subnet, clusterName)
 	}
 
 	// Add allocation to status
@@ -249,10 +268,15 @@ func (s *SliceIpamService) ReleaseSubnetForCluster(ctx context.Context, sliceNam
 			if allocation.Status == v1alpha1.SubnetStatusAllocated || allocation.Status == v1alpha1.SubnetStatusInUse {
 				// Mark as released
 				sliceIpam.Status.AllocatedSubnets[i].Status = v1alpha1.SubnetStatusReleased
+
+				// Set ReleasedAt timestamp for subnet reclamation tracking
+				now := metav1.Now()
+				sliceIpam.Status.AllocatedSubnets[i].ReleasedAt = &now
+
 				sliceIpam.Status.AvailableSubnets++
 				sliceIpam.Status.LastUpdated = metav1.Now()
 				found = true
-				logger.Infof("Marked subnet %s as released for cluster %s", allocation.Subnet, clusterName)
+				logger.Infof("Marked subnet %s as released for cluster %s at %v", allocation.Subnet, clusterName, now)
 				break
 			}
 		}
@@ -343,10 +367,10 @@ func (s *SliceIpamService) CreateSliceIpam(ctx context.Context, sliceConfig *v1a
 			SubnetSize:  24, // Default subnet size
 		},
 		Status: v1alpha1.SliceIpamStatus{
-			TotalSubnets:      totalSubnets,
-			AvailableSubnets:  totalSubnets,
-			AllocatedSubnets:  []v1alpha1.ClusterSubnetAllocation{},
-			LastUpdated:       metav1.Now(),
+			TotalSubnets:     totalSubnets,
+			AvailableSubnets: totalSubnets,
+			AllocatedSubnets: []v1alpha1.ClusterSubnetAllocation{},
+			LastUpdated:      metav1.Now(),
 		},
 	}
 
@@ -393,5 +417,101 @@ func (s *SliceIpamService) DeleteSliceIpam(ctx context.Context, sliceName, names
 	}
 
 	logger.Infof("Successfully deleted SliceIpam %s", sliceName)
+	return nil
+}
+
+// convertAllocationsToUtil converts API ClusterSubnetAllocation to util types
+func (s *SliceIpamService) convertAllocationsToUtil(allocations []v1alpha1.ClusterSubnetAllocation) []util.ClusterSubnetAllocation {
+	utilAllocations := make([]util.ClusterSubnetAllocation, len(allocations))
+
+	for i, allocation := range allocations {
+		utilAllocations[i] = util.ClusterSubnetAllocation{
+			ClusterName: allocation.ClusterName,
+			Subnet:      allocation.Subnet,
+			AllocatedAt: allocation.AllocatedAt.Time,
+			Status:      string(allocation.Status),
+		}
+
+		// Convert ReleasedAt if present
+		if allocation.ReleasedAt != nil {
+			utilAllocations[i].ReleasedAt = &allocation.ReleasedAt.Time
+		}
+	}
+
+	return utilAllocations
+}
+
+// removeReleasedAllocation removes a released allocation entry when it's being reclaimed
+func (s *SliceIpamService) removeReleasedAllocation(sliceIpam *v1alpha1.SliceIpam, subnet string) {
+	newAllocations := []v1alpha1.ClusterSubnetAllocation{}
+
+	for _, allocation := range sliceIpam.Status.AllocatedSubnets {
+		// Keep all allocations except the released one being reclaimed
+		if !(allocation.Subnet == subnet && allocation.Status == v1alpha1.SubnetStatusReleased) {
+			newAllocations = append(newAllocations, allocation)
+		}
+	}
+
+	sliceIpam.Status.AllocatedSubnets = newAllocations
+}
+
+// CleanupExpiredReleasedSubnets removes subnet allocations that have been in "Released" state beyond the expiration duration
+func (s *SliceIpamService) CleanupExpiredReleasedSubnets(ctx context.Context, sliceName, namespace string, expirationDuration time.Duration) error {
+	logger := util.CtxLogger(ctx)
+	logger.Debugf("Cleaning up expired released subnets for slice %s", sliceName)
+
+	// Get SliceIpam resource
+	sliceIpam := &v1alpha1.SliceIpam{}
+	key := types.NamespacedName{Name: sliceName, Namespace: namespace}
+	found, err := util.GetResourceIfExist(ctx, key, sliceIpam)
+	if err != nil {
+		logger.Errorf("Error getting SliceIpam resource: %v", err)
+		return err
+	}
+	if !found {
+		logger.Debugf("SliceIpam %s not found, skipping cleanup", sliceName)
+		return nil
+	}
+
+	// Filter out expired released subnets
+	currentTime := time.Now()
+	newAllocations := []v1alpha1.ClusterSubnetAllocation{}
+	removedCount := 0
+
+	for _, allocation := range sliceIpam.Status.AllocatedSubnets {
+		shouldRemove := false
+
+		if allocation.Status == v1alpha1.SubnetStatusReleased && allocation.ReleasedAt != nil {
+			// Check if the subnet has been released longer than expiration duration
+			if currentTime.Sub(allocation.ReleasedAt.Time) > expirationDuration {
+				shouldRemove = true
+				removedCount++
+				logger.Infof("Removing expired released subnet %s (released %v ago)",
+					allocation.Subnet, currentTime.Sub(allocation.ReleasedAt.Time))
+			}
+		}
+
+		if !shouldRemove {
+			newAllocations = append(newAllocations, allocation)
+		}
+	}
+
+	// Update if any subnets were removed
+	if removedCount > 0 {
+		sliceIpam.Status.AllocatedSubnets = newAllocations
+		sliceIpam.Status.LastUpdated = metav1.Now()
+
+		// Update resource
+		err = util.UpdateResource(ctx, sliceIpam)
+		if err != nil {
+			logger.Errorf("Failed to update SliceIpam after cleanup: %v", err)
+			return fmt.Errorf("failed to update SliceIpam after cleanup: %v", err)
+		}
+
+		logger.Infof("Successfully cleaned up %d expired released subnets for slice %s", removedCount, sliceName)
+	} else {
+		logger.Debugf("No expired released subnets found for slice %s", sliceName)
+	}
+
 	return nil
 }

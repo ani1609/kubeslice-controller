@@ -52,6 +52,7 @@ type ClusterSubnetAllocation struct {
 	Subnet      string
 	AllocatedAt time.Time
 	Status      string
+	ReleasedAt  *time.Time
 }
 
 const (
@@ -231,6 +232,57 @@ func (ia *IpamAllocator) FindNextAvailableSubnet(sliceSubnet string, subnetSize 
 	}
 
 	return "", ErrNoAvailableSubnets
+}
+
+// FindNextAvailableSubnetWithReclamation finds the next available subnet with support for reclaiming released subnets
+func (ia *IpamAllocator) FindNextAvailableSubnetWithReclamation(sliceSubnet string, subnetSize int, allocations []ClusterSubnetAllocation, reclaimAfter time.Duration) (string, bool, error) {
+	subnets, err := ia.GenerateSubnetList(sliceSubnet, subnetSize)
+	if err != nil {
+		return "", false, err
+	}
+
+	// Create maps for different allocation states
+	activeAllocated := make(map[string]bool)
+	reclaimableSubnets := make(map[string]ClusterSubnetAllocation)
+
+	currentTime := time.Now()
+
+	for _, allocation := range allocations {
+		switch allocation.Status {
+		case "Allocated", "InUse":
+			activeAllocated[allocation.Subnet] = true
+		case "Released":
+			// Check if subnet can be reclaimed based on release time
+			if allocation.ReleasedAt != nil {
+				if allocation.ReleasedAt.After(currentTime.Add(-reclaimAfter)) {
+					// Too recent to reclaim, treat as allocated
+					activeAllocated[allocation.Subnet] = true
+				} else {
+					// Available for reclamation
+					reclaimableSubnets[allocation.Subnet] = allocation
+				}
+			} else {
+				// ReleasedAt is nil, treat as reclaimable immediately (edge case)
+				reclaimableSubnets[allocation.Subnet] = allocation
+			}
+		}
+	}
+
+	// First priority: Try to reclaim a released subnet (reuse existing allocation)
+	for _, subnet := range subnets {
+		if _, canReclaim := reclaimableSubnets[subnet]; canReclaim {
+			return subnet, true, nil // true indicates this is a reclaimed subnet
+		}
+	}
+
+	// Second priority: Find a completely new subnet
+	for _, subnet := range subnets {
+		if !activeAllocated[subnet] && reclaimableSubnets[subnet].Subnet == "" {
+			return subnet, false, nil // false indicates this is a new subnet
+		}
+	}
+
+	return "", false, ErrNoAvailableSubnets
 }
 
 // FindOptimalSubnet finds the optimal subnet considering cluster hints and fragmentation

@@ -95,6 +95,11 @@ spec:
                     clusterName:
                       description: ClusterName is the name of the cluster
                       type: string
+                    releasedAt:
+                      description: ReleasedAt is the timestamp when the subnet was
+                        released (only set when status="Released")
+                      format: date-time
+                      type: string
                     status:
                       default: Allocated
                       description: Status represents the current status of the subnet

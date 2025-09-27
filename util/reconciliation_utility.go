@@ -37,6 +37,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// Client is an alias for controller-runtime client.Client interface
+type Client = client.Client
+
 var (
 	LabelsKubeSliceController = map[string]string{
 		LabelResourceOwner: LabelValueResourceOwner,

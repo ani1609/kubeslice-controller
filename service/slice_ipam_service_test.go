@@ -28,10 +28,10 @@ import (
 func TestNewSliceIpamService(t *testing.T) {
 	// Setup
 	mockMetrics := &metricMock.IMetricRecorder{}
-	
+
 	// Test service creation
 	service := NewSliceIpamService(mockMetrics)
-	
+
 	// Assertions
 	require.NotNil(t, service)
 	require.NotNil(t, service.mf)
@@ -42,7 +42,7 @@ func TestNewSliceIpamService(t *testing.T) {
 func TestSliceIpamService_InterfaceCompliance(t *testing.T) {
 	mockMetrics := &metricMock.IMetricRecorder{}
 	var service ISliceIpamService = NewSliceIpamService(mockMetrics)
-	
+
 	require.NotNil(t, service)
 	// Verify interface methods exist by accessing them
 	require.NotNil(t, service.ReconcileSliceIpam)
@@ -56,10 +56,10 @@ func TestSliceIpamService_InterfaceCompliance(t *testing.T) {
 func TestSliceIpamService_CreateSliceIpamValidation(t *testing.T) {
 	mockMetrics := &metricMock.IMetricRecorder{}
 	service := NewSliceIpamService(mockMetrics)
-	
+
 	// Test with nil slice config
 	require.NotNil(t, service)
-	
+
 	// Test with valid slice config
 	sliceConfig := &v1alpha1.SliceConfig{
 		ObjectMeta: metav1.ObjectMeta{
@@ -70,7 +70,7 @@ func TestSliceIpamService_CreateSliceIpamValidation(t *testing.T) {
 			SliceSubnet: "10.1.0.0/16",
 		},
 	}
-	
+
 	require.NotNil(t, sliceConfig)
 }
 
@@ -79,7 +79,7 @@ var SliceIpamServiceTestBed = map[string]func(t *testing.T){
 	"TestSliceIpamService_Constructor": func(t *testing.T) {
 		mockMetrics := &metricMock.IMetricRecorder{}
 		service := NewSliceIpamService(mockMetrics)
-		
+
 		require.NotNil(t, service)
 		require.Equal(t, mockMetrics, service.mf)
 		require.NotNil(t, service.allocator)
@@ -87,7 +87,7 @@ var SliceIpamServiceTestBed = map[string]func(t *testing.T){
 	"TestSliceIpamService_Interface": func(t *testing.T) {
 		mockMetrics := &metricMock.IMetricRecorder{}
 		var service ISliceIpamService = NewSliceIpamService(mockMetrics)
-		
+
 		require.NotNil(t, service)
 		// Verify interface methods exist
 		require.NotNil(t, service.ReconcileSliceIpam)
