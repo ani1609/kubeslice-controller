@@ -223,6 +223,15 @@ var _ = BeforeSuite(func() {
 	}).SetupWithManager(k8sManager)
 	Expect(err).ToNot(HaveOccurred())
 
+	err = (&SliceIpamReconciler{
+		Client:           k8sManager.GetClient(),
+		Scheme:           k8sManager.GetScheme(),
+		Log:              controllerLog.With("name", "SliceIpamController"),
+		SliceIpamService: svc.SliceIpamService,
+		EventRecorder:    &eventRecorder,
+	}).SetupWithManager(k8sManager)
+	Expect(err).ToNot(HaveOccurred())
+
 	// setup webhook
 
 	err = (&controllerv1alpha1.SliceConfig{}).SetupWebhookWithManager(k8sManager, service.ValidateSliceConfigCreate, service.ValidateSliceConfigUpdate, service.ValidateSliceConfigDelete)

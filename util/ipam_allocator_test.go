@@ -1102,3 +1102,355 @@ func containsSubstring(s, substr string) bool {
 	}
 	return false
 }
+
+// TestFindNextAvailableSubnetWithReclamation - Critical test for production-ready subnet reclamation
+func TestFindNextAvailableSubnetWithReclamation(t *testing.T) {
+	allocator := NewIpamAllocator()
+
+	tests := []struct {
+		name           string
+		sliceSubnet    string
+		subnetSize     int
+		allocations    []ClusterSubnetAllocation
+		reclaimAfter   time.Duration
+		expectedSubnet string
+		expectedReclaim bool
+		expectError    bool
+		description    string
+	}{
+		{
+			name:        "no-allocations-new-subnet",
+			sliceSubnet: "192.168.1.0/24",
+			subnetSize:  26,
+			allocations: []ClusterSubnetAllocation{},
+			reclaimAfter: 5 * time.Minute,
+			expectedSubnet: "192.168.1.0/26",
+			expectedReclaim: false,
+			expectError: false,
+			description: "Should allocate first subnet when no allocations exist",
+		},
+		{
+			name:        "active-allocations-new-subnet",
+			sliceSubnet: "192.168.1.0/24",
+			subnetSize:  26,
+			allocations: []ClusterSubnetAllocation{
+				{ClusterName: "cluster-1", Subnet: "192.168.1.0/26", AllocatedAt: time.Now(), Status: "Allocated"},
+			},
+			reclaimAfter: 5 * time.Minute,
+			expectedSubnet: "192.168.1.64/26",
+			expectedReclaim: false,
+			expectError: false,
+			description: "Should allocate next available subnet when existing allocations are active",
+		},
+		{
+			name:        "reclaim-expired-subnet",
+			sliceSubnet: "192.168.1.0/24",
+			subnetSize:  26,
+			allocations: []ClusterSubnetAllocation{
+				{
+					ClusterName: "cluster-old",
+					Subnet:      "192.168.1.0/26",
+					AllocatedAt: time.Now().Add(-10 * time.Minute),
+					Status:      "Released",
+					ReleasedAt:  &[]time.Time{time.Now().Add(-10 * time.Minute)}[0],
+				},
+			},
+			reclaimAfter: 5 * time.Minute,
+			expectedSubnet: "192.168.1.0/26",
+			expectedReclaim: true,
+			expectError: false,
+			description: "Should reclaim subnet released longer than reclaim period",
+		},
+		{
+			name:        "wait-for-reclaim-period",
+			sliceSubnet: "192.168.1.0/24",
+			subnetSize:  26,
+			allocations: []ClusterSubnetAllocation{
+				{
+					ClusterName: "cluster-recent",
+					Subnet:      "192.168.1.0/26",
+					AllocatedAt: time.Now().Add(-2 * time.Minute),
+					Status:      "Released",
+					ReleasedAt:  &[]time.Time{time.Now().Add(-2 * time.Minute)}[0],
+				},
+			},
+			reclaimAfter: 5 * time.Minute,
+			expectedSubnet: "192.168.1.64/26",
+			expectedReclaim: false,
+			expectError: false,
+			description: "Should allocate new subnet when released subnet is within reclaim period",
+		},
+		{
+			name:        "mixed-allocations-prefer-reclaim",
+			sliceSubnet: "192.168.1.0/24",
+			subnetSize:  26,
+			allocations: []ClusterSubnetAllocation{
+				{ClusterName: "cluster-active", Subnet: "192.168.1.64/26", AllocatedAt: time.Now(), Status: "Allocated"},
+				{
+					ClusterName: "cluster-released",
+					Subnet:      "192.168.1.0/26",
+					AllocatedAt: time.Now().Add(-8 * time.Minute),
+					Status:      "Released",
+					ReleasedAt:  &[]time.Time{time.Now().Add(-8 * time.Minute)}[0],
+				},
+			},
+			reclaimAfter: 5 * time.Minute,
+			expectedSubnet: "192.168.1.0/26",
+			expectedReclaim: true,
+			expectError: false,
+			description: "Should prefer reclaiming expired subnet over allocating new one",
+		},
+		{
+			name:        "no-available-subnets-all-active",
+			sliceSubnet: "192.168.1.0/24",
+			subnetSize:  26,
+			allocations: []ClusterSubnetAllocation{
+				{ClusterName: "cluster-1", Subnet: "192.168.1.0/26", AllocatedAt: time.Now(), Status: "Allocated"},
+				{ClusterName: "cluster-2", Subnet: "192.168.1.64/26", AllocatedAt: time.Now(), Status: "Allocated"},
+				{ClusterName: "cluster-3", Subnet: "192.168.1.128/26", AllocatedAt: time.Now(), Status: "Allocated"},
+				{ClusterName: "cluster-4", Subnet: "192.168.1.192/26", AllocatedAt: time.Now(), Status: "Allocated"},
+			},
+			reclaimAfter: 5 * time.Minute,
+			expectedSubnet: "",
+			expectedReclaim: false,
+			expectError: true,
+			description: "Should return error when all subnets are allocated and none can be reclaimed",
+		},
+		{
+			name:        "multiple-reclaimable-subnets",
+			sliceSubnet: "192.168.1.0/24",
+			subnetSize:  26,
+			allocations: []ClusterSubnetAllocation{
+				{
+					ClusterName: "cluster-1",
+					Subnet:      "192.168.1.0/26",
+					AllocatedAt: time.Now().Add(-15 * time.Minute),
+					Status:      "Released",
+					ReleasedAt:  &[]time.Time{time.Now().Add(-15 * time.Minute)}[0],
+				},
+				{
+					ClusterName: "cluster-2",
+					Subnet:      "192.168.1.64/26",
+					AllocatedAt: time.Now().Add(-10 * time.Minute),
+					Status:      "Released",
+					ReleasedAt:  &[]time.Time{time.Now().Add(-10 * time.Minute)}[0],
+				},
+			},
+			reclaimAfter: 5 * time.Minute,
+			expectedSubnet: "192.168.1.0/26", // Should reclaim the first available
+			expectedReclaim: true,
+			expectError: false,
+			description: "Should reclaim first available subnet when multiple are reclaimable",
+		},
+		{
+			name:        "released-without-timestamp",
+			sliceSubnet: "192.168.1.0/24",
+			subnetSize:  26,
+			allocations: []ClusterSubnetAllocation{
+				{
+					ClusterName: "cluster-edge-case",
+					Subnet:      "192.168.1.0/26",
+					AllocatedAt: time.Now().Add(-10 * time.Minute),
+					Status:      "Released",
+					ReleasedAt:  nil, // Edge case: ReleasedAt is nil
+				},
+			},
+			reclaimAfter: 5 * time.Minute,
+			expectedSubnet: "192.168.1.0/26",
+			expectedReclaim: true,
+			expectError: false,
+			description: "Should reclaim subnet with Released status even if ReleasedAt is nil",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			subnet, isReclaimed, err := allocator.FindNextAvailableSubnetWithReclamation(
+				tt.sliceSubnet,
+				tt.subnetSize,
+				tt.allocations,
+				tt.reclaimAfter,
+			)
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("Expected error but got subnet: %s (reclaimed: %t)", subnet, isReclaimed)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Errorf("Expected no error but got: %v", err)
+				return
+			}
+
+			if subnet != tt.expectedSubnet {
+				t.Errorf("Expected subnet %s, got %s", tt.expectedSubnet, subnet)
+			}
+
+			if isReclaimed != tt.expectedReclaim {
+				t.Errorf("Expected reclaimed=%t, got %t", tt.expectedReclaim, isReclaimed)
+			}
+
+			t.Logf("✅ %s: Got subnet %s (reclaimed: %t)", tt.description, subnet, isReclaimed)
+		})
+	}
+}
+
+// TestSubnetReclamationIntegration - Integration test for complete reclamation workflow
+func TestSubnetReclamationIntegration(t *testing.T) {
+	allocator := NewIpamAllocator()
+	sliceSubnet := "192.168.1.0/24"
+	subnetSize := 26
+	reclaimAfter := 2 * time.Second // Short duration for testing
+
+	// Phase 1: Allocate all subnets
+	allocations := []ClusterSubnetAllocation{}
+	expectedSubnets := []string{"192.168.1.0/26", "192.168.1.64/26", "192.168.1.128/26", "192.168.1.192/26"}
+
+	for i, expectedSubnet := range expectedSubnets {
+		subnet, isReclaimed, err := allocator.FindNextAvailableSubnetWithReclamation(
+			sliceSubnet, subnetSize, allocations, reclaimAfter)
+		
+		if err != nil {
+			t.Fatalf("Phase 1 - Failed to allocate subnet %d: %v", i, err)
+		}
+		if isReclaimed {
+			t.Errorf("Phase 1 - Unexpected reclamation for new allocation %d", i)
+		}
+		if subnet != expectedSubnet {
+			t.Errorf("Phase 1 - Expected subnet %s, got %s", expectedSubnet, subnet)
+		}
+
+		// Add to allocations
+		allocations = append(allocations, ClusterSubnetAllocation{
+			ClusterName: fmt.Sprintf("cluster-%d", i+1),
+			Subnet:      subnet,
+			AllocatedAt: time.Now(),
+			Status:      "Allocated",
+		})
+	}
+
+	// Phase 2: Verify exhaustion
+	_, _, err := allocator.FindNextAvailableSubnetWithReclamation(
+		sliceSubnet, subnetSize, allocations, reclaimAfter)
+	if err == nil {
+		t.Error("Phase 2 - Expected error when all subnets allocated")
+	}
+
+	// Phase 3: Release some subnets
+	now := time.Now()
+	allocations[0].Status = "Released"
+	allocations[0].ReleasedAt = &now
+
+	allocations[2].Status = "Released" 
+	allocations[2].ReleasedAt = &now
+
+	// Phase 4: Verify can't reclaim immediately (within reclaim period)
+	subnet, isReclaimed, err := allocator.FindNextAvailableSubnetWithReclamation(
+		sliceSubnet, subnetSize, allocations, reclaimAfter)
+	if err == nil {
+		t.Errorf("Phase 4 - Expected error within reclaim period, but got subnet %s (reclaimed: %t)", subnet, isReclaimed)
+	}
+
+	// Phase 5: Wait for reclaim period and verify reclamation
+	time.Sleep(reclaimAfter + 100*time.Millisecond) // Add buffer
+
+	subnet, isReclaimed, err = allocator.FindNextAvailableSubnetWithReclamation(
+		sliceSubnet, subnetSize, allocations, reclaimAfter)
+	if err != nil {
+		t.Fatalf("Phase 5 - Failed to reclaim subnet after waiting: %v", err)
+	}
+	if !isReclaimed {
+		t.Error("Phase 5 - Expected reclamation but got new allocation")
+	}
+	if subnet != "192.168.1.0/26" && subnet != "192.168.1.128/26" {
+		t.Errorf("Phase 5 - Expected reclaimed subnet to be one of the released ones, got %s", subnet)
+	}
+
+	t.Logf("✅ Integration test completed successfully. Reclaimed subnet: %s", subnet)
+}
+
+// TestSubnetReclamationPerformance - Performance test for reclamation logic
+func TestSubnetReclamationPerformance(t *testing.T) {
+	allocator := NewIpamAllocator()
+	sliceSubnet := "10.0.0.0/16" // Large subnet for performance testing
+	subnetSize := 24
+	reclaimAfter := 1 * time.Minute
+
+	// Create many allocations with mixed status
+	numAllocations := 1000
+	allocations := make([]ClusterSubnetAllocation, numAllocations)
+	now := time.Now()
+	
+	for i := 0; i < numAllocations; i++ {
+		status := "Allocated"
+		var releasedAt *time.Time
+		
+		// Make every 3rd allocation released and expired
+		if i%3 == 0 {
+			status = "Released"
+			expired := now.Add(-10 * time.Minute)
+			releasedAt = &expired
+		}
+		
+		allocations[i] = ClusterSubnetAllocation{
+			ClusterName: fmt.Sprintf("cluster-%d", i),
+			Subnet:      fmt.Sprintf("10.0.%d.0/24", i),
+			AllocatedAt: now,
+			Status:      status,
+			ReleasedAt:  releasedAt,
+		}
+	}
+
+	// Measure performance
+	start := time.Now()
+	
+	for i := 0; i < 100; i++ { // Run multiple iterations
+		_, _, err := allocator.FindNextAvailableSubnetWithReclamation(
+			sliceSubnet, subnetSize, allocations, reclaimAfter)
+		if err != nil {
+			// Expected for this large allocation set
+			continue
+		}
+	}
+	
+	duration := time.Since(start)
+	avgDuration := duration / 100
+	
+	// Performance assertion - should complete within reasonable time
+	if avgDuration > 10*time.Millisecond {
+		t.Errorf("Performance test failed: average duration %v exceeds 10ms threshold", avgDuration)
+	} else {
+		t.Logf("✅ Performance test passed: average duration %v", avgDuration)
+	}
+}
+
+// BenchmarkSubnetReclamation - Benchmark for reclamation performance
+func BenchmarkSubnetReclamation(b *testing.B) {
+	allocator := NewIpamAllocator()
+	sliceSubnet := "10.0.0.0/16"
+	subnetSize := 24
+	reclaimAfter := 5 * time.Minute
+
+	// Setup allocations
+	allocations := []ClusterSubnetAllocation{
+		{ClusterName: "cluster-1", Subnet: "10.0.1.0/24", AllocatedAt: time.Now(), Status: "Allocated"},
+		{
+			ClusterName: "cluster-2",
+			Subnet:      "10.0.2.0/24",
+			AllocatedAt: time.Now().Add(-10 * time.Minute),
+			Status:      "Released",
+			ReleasedAt:  &[]time.Time{time.Now().Add(-10 * time.Minute)}[0],
+		},
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _, err := allocator.FindNextAvailableSubnetWithReclamation(
+			sliceSubnet, subnetSize, allocations, reclaimAfter)
+		if err != nil {
+			b.Fatalf("Reclamation benchmark failed: %v", err)
+		}
+	}
+}
